@@ -16,6 +16,22 @@ import streamlit as st
 # ── 設定 ──────────────────────────────────────────────
 DB_PATH = Path(__file__).parent / "gas_data.db"
 
+# EIA API Key：優先讀 Streamlit Secrets，其次讀 .env
+import os
+from dotenv import load_dotenv
+load_dotenv()
+try:
+    EIA_API_KEY = st.secrets["EIA_API_KEY"]
+except Exception:
+    EIA_API_KEY = os.getenv("EIA_API_KEY", "")
+
+EIA_BASE = "https://api.eia.gov/v2"
+EIA_SERIES = {
+    "NW2_EPG0_SWO_R48_BCF": {"name": "US Working Gas in Storage", "unit": "Bcf", "freq": "weekly"},
+    "N9070US2": {"name": "US Dry Natural Gas Production", "unit": "MMcf", "freq": "monthly"},
+    "N9140US2": {"name": "US Natural Gas Total Consumption", "unit": "MMcf", "freq": "monthly"},
+}
+
 st.set_page_config(
     page_title="Global Gas Intelligence",
     page_icon="⛽",
@@ -142,15 +158,53 @@ def load_stocks(days: int = 90) -> pd.DataFrame:
     return df
 
 
-@st.cache_data(ttl=300)
-def load_eia() -> pd.DataFrame:
-    if not DB_PATH.exists():
+@st.cache_data(ttl=3600)
+def fetch_live_eia() -> pd.DataFrame:
+    """雲端模式：直接從 EIA API 抓取"""
+    import requests
+    if not EIA_API_KEY:
         return pd.DataFrame()
-    with sqlite3.connect(DB_PATH) as conn:
-        df = pd.read_sql("SELECT date, series_name, value, unit FROM eia_supply ORDER BY date DESC", conn)
-    if df.empty: return df
+    rows = []
+    for sid, meta in EIA_SERIES.items():
+        from datetime import datetime, timedelta
+        start = (datetime.now() - timedelta(days=180)).strftime("%Y-%m-%d")
+        if meta["freq"] == "weekly":
+            url = f"{EIA_BASE}/natural-gas/stor/wkly/data/"
+            params = {"api_key": EIA_API_KEY, "frequency": "weekly",
+                      "data[0]": "value", "facets[series][]": sid,
+                      "start": start, "sort[0][column]": "period",
+                      "sort[0][direction]": "desc", "length": 52}
+        else:
+            url = f"{EIA_BASE}/natural-gas/sum/snd/data/"
+            params = {"api_key": EIA_API_KEY, "frequency": "monthly",
+                      "data[0]": "value", "facets[series][]": sid,
+                      "start": start, "sort[0][column]": "period",
+                      "sort[0][direction]": "desc", "length": 24}
+        try:
+            resp = requests.get(url, params=params, timeout=15)
+            data = resp.json().get("response", {}).get("data", [])
+            for item in data:
+                rows.append({"date": item.get("period",""),
+                             "series_name": meta["name"],
+                             "value": float(item.get("value") or 0),
+                             "unit": meta["unit"]})
+        except Exception:
+            continue
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame(rows)
     df["date"] = pd.to_datetime(df["date"], format="mixed")
     return df
+
+@st.cache_data(ttl=300)
+def load_eia() -> pd.DataFrame:
+    if DB_PATH.exists():
+        with sqlite3.connect(DB_PATH) as conn:
+            df = pd.read_sql("SELECT date, series_name, value, unit FROM eia_supply ORDER BY date DESC", conn)
+        if not df.empty:
+            df["date"] = pd.to_datetime(df["date"], format="mixed")
+            return df
+    return fetch_live_eia()
 
 
 @st.cache_data(ttl=300)
