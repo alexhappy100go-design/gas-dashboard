@@ -207,16 +207,50 @@ def load_eia() -> pd.DataFrame:
     return fetch_live_eia()
 
 
-@st.cache_data(ttl=300)
-def load_climate(days: int = 30) -> pd.DataFrame:
-    if not DB_PATH.exists():
+@st.cache_data(ttl=3600)
+def fetch_live_climate(days: int = 30) -> pd.DataFrame:
+    """直接從 Open-Meteo 抓取氣候數據（免費無需 key）"""
+    import requests
+    locations = {
+        "US": [{"lat": 42.36, "lon": -71.06}, {"lat": 41.88, "lon": -87.63}],
+        "EU": [{"lat": 52.52, "lon": 13.40},  {"lat": 48.85, "lon": 2.35}],
+    }
+    start = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+    end   = datetime.now().strftime("%Y-%m-%d")
+    rows = []
+    for region, locs in locations.items():
+        for loc in locs:
+            try:
+                resp = requests.get("https://api.open-meteo.com/v1/forecast", params={
+                    "latitude": loc["lat"], "longitude": loc["lon"],
+                    "daily": "temperature_2m_mean", "start_date": start,
+                    "end_date": end, "timezone": "UTC",
+                }, timeout=10)
+                data = resp.json().get("daily", {})
+                for date, temp in zip(data.get("time",[]), data.get("temperature_2m_mean",[])):
+                    if temp is None: continue
+                    rows.append({"date": date, "region": region,
+                                 "hdd": max(18 - temp, 0), "cdd": max(temp - 18, 0),
+                                 "temp_c": round(temp, 2)})
+            except Exception:
+                continue
+    if not rows:
         return pd.DataFrame()
-    since = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
-    with sqlite3.connect(DB_PATH) as conn:
-        df = pd.read_sql("SELECT date, region, hdd, cdd, temp_c FROM climate WHERE date >= ? ORDER BY date", conn, params=(since,))
-    if df.empty: return df
+    df = pd.DataFrame(rows)
+    df = df.groupby(["date","region"]).mean(numeric_only=True).reset_index()
     df["date"] = pd.to_datetime(df["date"], format="mixed")
     return df
+
+@st.cache_data(ttl=300)
+def load_climate(days: int = 30) -> pd.DataFrame:
+    if DB_PATH.exists():
+        since = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+        with sqlite3.connect(DB_PATH) as conn:
+            df = pd.read_sql("SELECT date, region, hdd, cdd, temp_c FROM climate WHERE date >= ? ORDER BY date", conn, params=(since,))
+        if not df.empty:
+            df["date"] = pd.to_datetime(df["date"], format="mixed")
+            return df
+    return fetch_live_climate(days)
 
 
 def get_latest(df: pd.DataFrame, market: str) -> tuple:
