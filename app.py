@@ -89,31 +89,56 @@ st.markdown("""
 
 
 # ── 資料讀取 ──────────────────────────────────────────
+FUTURES_MAP = {"HH":"NG=F","TTF":"TTF=F","JKM":"LNG","BRENT":"BZ=F"}
+STOCK_MAP   = {"WDS":"WDS","WDS.AX":"WDS.AX","XOM":"XOM","CVX":"CVX","SHEL":"SHEL"}
+
+@st.cache_data(ttl=3600)
+def fetch_live(tickers_map: dict, col: str) -> pd.DataFrame:
+    try:
+        import yfinance as yf
+    except ImportError:
+        return pd.DataFrame()
+    start = (datetime.now() - timedelta(days=90)).strftime("%Y-%m-%d")
+    rows = []
+    for name, ticker in tickers_map.items():
+        try:
+            df = yf.Ticker(ticker).history(start=start, auto_adjust=True).reset_index()
+            if df.empty: continue
+            df.columns = [c if isinstance(c,str) else c[0] for c in df.columns]
+            for _, row in df.iterrows():
+                rows.append({"date": str(row["Date"])[:10], col: name, "value": round(float(row["Close"]),4)})
+        except Exception:
+            continue
+    if not rows: return pd.DataFrame()
+    r = pd.DataFrame(rows)
+    r["date"] = pd.to_datetime(r["date"], format="mixed")
+    return r
+
 @st.cache_data(ttl=300)
 def load_prices(days: int = 90) -> pd.DataFrame:
-    if not DB_PATH.exists():
-        return pd.DataFrame()
-    since = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
-    with sqlite3.connect(DB_PATH) as conn:
-        df = pd.read_sql(
-            "SELECT date, market, price FROM prices WHERE date >= ? ORDER BY date",
-            conn, params=(since,)
-        )
-    df["date"] = pd.to_datetime(df["date"], format="mixed")
+    if DB_PATH.exists():
+        since = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+        with sqlite3.connect(DB_PATH) as conn:
+            df = pd.read_sql("SELECT date, market, price FROM prices WHERE date >= ? ORDER BY date", conn, params=(since,))
+        if not df.empty:
+            df["date"] = pd.to_datetime(df["date"], format="mixed")
+            return df
+    df = fetch_live(FUTURES_MAP, "market")
+    if not df.empty: df = df.rename(columns={"value":"price"})
     return df
 
 
 @st.cache_data(ttl=300)
 def load_stocks(days: int = 90) -> pd.DataFrame:
-    if not DB_PATH.exists():
-        return pd.DataFrame()
-    since = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
-    with sqlite3.connect(DB_PATH) as conn:
-        df = pd.read_sql(
-            "SELECT date, ticker, close FROM stocks WHERE date >= ? ORDER BY date",
-            conn, params=(since,)
-        )
-    df["date"] = pd.to_datetime(df["date"], format="mixed")
+    if DB_PATH.exists():
+        since = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+        with sqlite3.connect(DB_PATH) as conn:
+            df = pd.read_sql("SELECT date, ticker, close FROM stocks WHERE date >= ? ORDER BY date", conn, params=(since,))
+        if not df.empty:
+            df["date"] = pd.to_datetime(df["date"], format="mixed")
+            return df
+    df = fetch_live(STOCK_MAP, "ticker")
+    if not df.empty: df = df.rename(columns={"value":"close"})
     return df
 
 
@@ -122,10 +147,8 @@ def load_eia() -> pd.DataFrame:
     if not DB_PATH.exists():
         return pd.DataFrame()
     with sqlite3.connect(DB_PATH) as conn:
-        df = pd.read_sql(
-            "SELECT date, series_name, value, unit FROM eia_supply ORDER BY date DESC",
-            conn
-        )
+        df = pd.read_sql("SELECT date, series_name, value, unit FROM eia_supply ORDER BY date DESC", conn)
+    if df.empty: return df
     df["date"] = pd.to_datetime(df["date"], format="mixed")
     return df
 
@@ -136,10 +159,8 @@ def load_climate(days: int = 30) -> pd.DataFrame:
         return pd.DataFrame()
     since = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
     with sqlite3.connect(DB_PATH) as conn:
-        df = pd.read_sql(
-            "SELECT date, region, hdd, cdd, temp_c FROM climate WHERE date >= ? ORDER BY date",
-            conn, params=(since,)
-        )
+        df = pd.read_sql("SELECT date, region, hdd, cdd, temp_c FROM climate WHERE date >= ? ORDER BY date", conn, params=(since,))
+    if df.empty: return df
     df["date"] = pd.to_datetime(df["date"], format="mixed")
     return df
 
